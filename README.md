@@ -4,14 +4,14 @@
 
 
 ## WARNING
-This script is going to patch your TF2 client. Connecting to VAC-secured
+This program is going to patch your TF2 client. Connecting to VAC-secured
 servers with a modified client can get you VAC banned. It probably won't
 happen, but it could. I am not responsible for any damages done to your
 computer or Steam account.
 Read more: https://help.steampowered.com/en/faqs/view/571A-97DA-70E9-FF74
 
-## Usage
-`python3 mvm-inspect-patch.py <path-to-tf2-installation>`
+## Building
+With Visual Studio installed, run `build.bat`
 
 ## License
 [MIT](/LICENSE)
