@@ -12,4 +12,4 @@ where /Q cl.exe || (
     call "!VS!\VC\Auxiliary\Build\vcvarsall.bat" x86 || exit /b 1
 )
 
-cl.exe /nologo /W4 /wd4100 patcher.c 
+cl.exe /nologo /O2 /W4 /wd4100 patcher.c 
