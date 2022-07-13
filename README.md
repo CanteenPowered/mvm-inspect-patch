@@ -11,7 +11,14 @@ computer or Steam account.
 Read more: https://help.steampowered.com/en/faqs/view/571A-97DA-70E9-FF74
 
 ## Building
-With Visual Studio installed, run `build.bat`
+Windows: With Visual Studio installed, run `build.bat`
+
+Linux: With GCC installed, run `build.sh`
+
+## Usage
+Windows: Run `patcher.exe`
+
+Linux: Run `./patcher` as root
 
 ## License
 [MIT](/LICENSE)
