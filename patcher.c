@@ -2,16 +2,29 @@
     #define PATCHER_WINDOWS
     #define _CRT_SECURE_NO_WARNINGS
 #endif
+#ifdef __linux__
+    #define PATCHER_LINUX
+    #define _GNU_SOURCE
+#endif
 
-#include <conio.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #ifdef PATCHER_WINDOWS
     #include <windows.h>
     #include <tlhelp32.h>
+    #include <conio.h>
 
     #pragma comment(lib, "user32.lib")
+#endif
+#ifdef PATCHER_LINUX
+    #include <dirent.h>
+    #include <fcntl.h>
+    #include <unistd.h>
+    #include <sys/ptrace.h>
+    #include <sys/wait.h>
 #endif
 
 //
@@ -21,6 +34,9 @@
 void die(const char* error) {
 #ifdef PATCHER_WINDOWS
     MessageBox(NULL, error, "Patcher - Error", MB_OK | MB_ICONERROR);
+#endif
+#ifdef PATCHER_LINUX
+    fprintf(stderr, "Error: %s\n", error);
 #endif
     exit(1);
 }
@@ -68,12 +84,63 @@ bool open_process(const char* name, process_t* process) {
 
     CloseHandle(snap);
 #endif
+#ifdef PATCHER_LINUX
+    // Walk /proc/ entries
+    DIR* proc = opendir("/proc");
+    if (proc == NULL) {
+        die("Failed to read /proc/");
+        return false;
+    }
+    struct dirent* dir;
+    while ((dir = readdir(proc)) != NULL) {
+        // only look at subdirectories
+        if (dir->d_type != DT_DIR) {
+            continue;
+        }
+        // only look at directories with numeric names
+        if (dir->d_name[0] < '0' || dir->d_name[0] > '9') {
+            continue;
+        }
+
+        // temporary buffer for formatting /proc/ entries
+        char entrybuf[256] = { 0 };
+
+        // get executable path
+        snprintf(entrybuf, sizeof(entrybuf), "/proc/%s/exe", dir->d_name);
+        char exe_path[1024]; // magic number
+
+        // readlink doesn't null-terminate the string written to exe_path, lovely
+        {
+            ssize_t r = readlink(entrybuf, exe_path, sizeof(exe_path));
+            if (r == -1) {
+                continue;
+            }
+            exe_path[r] = '\0';
+        }
+
+        // Find matching entry
+        if (strcmp(basename(exe_path), name) == 0) {
+            process->pid = atoi(dir->d_name);
+            closedir(proc);
+            // attach
+            if (ptrace(PTRACE_ATTACH, process->pid, 0, 0) == -1) {
+                die("PTRACE_ATTACH failed");
+            }
+            waitpid(process->pid, NULL, 0);
+            return true;
+        }
+    }
+    closedir(proc);
+#endif
     return false;
 }
 
 void close_process(process_t* process) {
 #ifdef PATCHER_WINDOWS
     CloseHandle(process->handle);
+#endif
+#ifdef PATCHER_LINUX
+    ptrace(PTRACE_DETACH, process->pid, 0, 0);
 #endif
 }
 
@@ -101,11 +168,71 @@ bool find_process_module(process_t* process, const char* name, module_t* module)
 
     CloseHandle(snap);
 #endif
+#ifdef PATCHER_LINUX
+    // parse /proc/<pid>/maps
+    // format path 
+    char entrybuf[256] = { 0 };
+    snprintf(entrybuf, sizeof(entrybuf), "/proc/%ld/maps", process->pid);
+    FILE* maps = fopen(entrybuf, "r");
+    if (maps == NULL) {
+        die("Failed to read /proc/maps for game process");
+    }
+
+    // read line by line
+    bool    result = false;
+    char*   line = NULL;
+    size_t  line_len = 0;
+    while (getline(&line, &line_len, maps) != -1) {
+        // try to parse line
+        uintptr_t start;
+        uintptr_t end;
+        char perms[32];
+        uintptr_t offset;
+        char dev[32];
+        uintptr_t inode;
+        char path[1024];
+        if (sscanf(line, "%lX-%lX %s %lx %s %lx %[^\t\n]", &start, &end, perms, &offset, dev, &inode, path) != 7) {
+            continue;
+        }
+        // match file name
+        if (strcmp(basename(path), name) == 0) {
+            result = true;
+            module->base_address = start;
+            strncpy(module->path, path, sizeof(module->path));
+            goto done;
+        }
+    }
+
+done:
+    if (line != NULL) {
+        free(line);
+    }
+    fclose(maps);
+    return result;
+#endif
     return false;
 }
 
 bool write_process_memory(process_t* process, uintptr_t address, void* buf, size_t bufsz) {
+#ifdef PATCHER_WINDOWS
     return WriteProcessMemory(process->handle, (LPVOID)address, buf, bufsz, NULL) != 0;
+#endif
+#ifdef PATCHER_LINUX
+    // open /proc/mem for reading
+    char memfile[256];
+    snprintf(memfile, sizeof(memfile), "/proc/%ld/mem", process->pid);
+    int fd = open(memfile, O_RDWR);
+    if (fd == -1) {
+        die("Failed to open /proc/mem for game process");
+    }
+    
+    bool ok = pwrite(fd, buf, bufsz, address) > 0;
+
+    close(fd);
+
+    return ok;
+#endif
+    return false;
 }
 
 //
@@ -160,11 +287,14 @@ static int next_key(void) {
 #ifdef PATCHER_WINDOWS
     return _getch();
 #endif
+#ifdef PATCHER_LINUX
+    return getc(stdin);
+#endif
 }
 
 bool ask_continue(void) {
     printf("Press Y to continue or any other key to quit\n");
-    int c = next_key();
+    char c = (char)next_key();
     return c == 'y' || c == 'Y';
 }
 
@@ -191,8 +321,20 @@ const char* WARNING =
     #define PATCH_TARGET    "\x75\x2A\x8B\x0D\x2A\x2A\x2A\x2A\x68\x2A\x2A\x2A\x2A\x8B\x01\xFF\x50\x2A\x5E\x5F"
     #define PATCH_DATA      X86INS_JMP
 #endif
+#ifdef PATCHER_LINUX
+    #define TF2_EXE         "hl2_linux"
+    #define TF2_CLIENT      "client.so"
+    #define PATCH_TARGET    "\x0F\x84\x2A\x2A\x2A\x2A\x8B\x07\x89\x55\x2A\x89\x4D\x2A\x89\x3C\x24\xFF\x50"
+    #define PATCH_DATA      X86INS_NOP, X86INS_NOP, X86INS_NOP, X86INS_NOP, X86INS_NOP, X86INS_NOP
+#endif
 
 int main(int argc, char* argv[]) {
+    // Must be root on Linux
+#ifdef PATCHER_LINUX
+    if (geteuid() != 0) {
+        die("Please run as root.");
+    }
+#endif
     // Disable prompt if --no-prompt flag is set
     bool disable_prompt = false;
     for (int i = 1; i < argc; ++i) {
@@ -208,21 +350,21 @@ int main(int argc, char* argv[]) {
     }
 
     // Find running TF2 process
-    process_t tf2;
+    process_t tf2 = { 0 };
     if (!open_process(TF2_EXE, &tf2)) {
         die("Couldn't find TF2 process. Is the game running?");
     }
     printf("Found running Team Fortress 2 process:\n");
-    printf("    PID:            %u\n", tf2.pid);
+    printf("    PID:            %lu\n", tf2.pid);
 
     // Find client game library (client.dll, client.so)
-    module_t client;
+    module_t client = { 0 };
     if (!find_process_module(&tf2, TF2_CLIENT, &client)) {
         die("Failed to find TF2 client library");
     }
 
     printf("Found client library:\n");
-    printf("    Base address:   0x%X\n", client.base_address);
+    printf("    Base address:   0x%lX\n", client.base_address);
     printf("    Path:           %s\n", client.path);
 
     // Load client library from disk
@@ -244,8 +386,8 @@ int main(int argc, char* argv[]) {
 #endif
 
     printf("Found patch target:\n");
-    printf("    File offset:    %s+0x%X\n", TF2_CLIENT, patch_offset);
-    printf("    Virtual addr:   0x%X\n", patch_target);
+    printf("    File offset:    %s+0x%lX\n", TF2_CLIENT, patch_offset);
+    printf("    Virtual addr:   0x%lX\n", patch_target);
 
     // Write patch to game memory
     uint8_t patch[] = { PATCH_DATA };
@@ -253,12 +395,12 @@ int main(int argc, char* argv[]) {
         die("Failed to write to game memory");
     }
 
-    printf("Applied %d byte patch\n", sizeof(patch));
+    printf("Applied %lu byte patch\n", sizeof(patch));
 
     // Clean up
     close_process(&tf2);
 
-    printf("Have a nice day.");
+    printf("Have a nice day.\n");
     if (!disable_prompt) {
         next_key();
     }
